@@ -5,6 +5,8 @@ import { mkdtemp, mkdir, writeFile, readFile, rm, stat, symlink } from "node:fs/
 import { createServer, request } from "node:http";
 import { join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
+import { execFile } from "node:child_process";
+import { pathToFileURL } from "node:url";
 
 import {
   toKebab,
@@ -22,6 +24,12 @@ import {
   saveSourceFolder,
   clearSourceFolder,
   syncSourceFolder,
+  normalizeRepoUrl,
+  normalizeSubdir,
+  saveGitRepo,
+  clearGitRepo,
+  syncGitRepo,
+  importFromGitRepo,
 } from "../lib/core.js";
 import { apply as applyHost, notifyChatCatalog } from "../lib/index.js";
 
@@ -633,6 +641,77 @@ const clearResult = await clearSourceFolder();
 ok(clearResult.sourceFolder === null, "clearSourceFolder clears the saved folder");
 const snapAfterClear = await state();
 ok(snapAfterClear.sourceFolder === null, "state exposes null after clearing the source folder");
+
+// ── GitHub 仓库地址与子目录校验 ──
+eq(normalizeRepoUrl("").ok, false, "normalizeRepoUrl rejects empty input");
+eq(normalizeRepoUrl("not-a-url").ok, false, "normalizeRepoUrl rejects a bare string");
+eq(normalizeRepoUrl("https://github.com/owner/repo.git").ok, true, "normalizeRepoUrl accepts an https URL");
+eq(normalizeRepoUrl("git@github.com:owner/repo.git").ok, true, "normalizeRepoUrl accepts a git@ URL");
+eq(normalizeRepoUrl("file:///C:/tmp/repo").ok, true, "normalizeRepoUrl accepts a file URL");
+
+eq(normalizeSubdir("").subdir, "", "normalizeSubdir treats empty as root");
+eq(normalizeSubdir("skills").subdir, "skills", "normalizeSubdir keeps a plain segment");
+eq(normalizeSubdir("  skills/  ").subdir, "skills", "normalizeSubdir trims and strips slashes");
+eq(normalizeSubdir("a/b").subdir, "a/b", "normalizeSubdir keeps nested segments");
+ok(normalizeSubdir("../evil").ok === false, "normalizeSubdir rejects parent traversal");
+ok(normalizeSubdir("/abs").ok === false, "normalizeSubdir rejects an absolute path");
+ok(normalizeSubdir("C:/win").ok === false, "normalizeSubdir rejects a drive path");
+
+// ── GitHub 仓库保存 / 清除 / 状态（不触发克隆） ──
+const badGitSave = await saveGitRepo("not-a-url", "");
+ok(badGitSave.ok === false, "saveGitRepo rejects an invalid URL");
+eq(badGitSave.code, "error.github.invalidUrl", "invalid save carries the invalidUrl code");
+
+const badGitImport = await importFromGitRepo("not-a-url", "");
+ok(badGitImport.ok === false, "importFromGitRepo rejects an invalid URL before cloning");
+eq(badGitImport.code, "error.github.invalidUrl", "invalid import carries the invalidUrl code");
+
+const notSetGit = await syncGitRepo();
+ok(notSetGit.ok === false, "syncGitRepo errors before any repo is saved");
+eq(notSetGit.code, "error.github.notSet", "unsaved git sync carries the notSet code");
+
+const goodGitSave = await saveGitRepo("https://github.com/deronghe/skills.git", "skills");
+ok(goodGitSave.gitRepo && goodGitSave.gitRepo.url === "https://github.com/deronghe/skills.git", "saveGitRepo persists the repo URL");
+eq(goodGitSave.gitRepo.subdir, "skills", "saveGitRepo persists the subdir");
+
+const snapWithRepo = await state();
+ok(snapWithRepo.gitRepo && snapWithRepo.gitRepo.url === "https://github.com/deronghe/skills.git", "state exposes the saved gitRepo");
+eq(snapWithRepo.gitRepo.subdir, "skills", "state exposes the gitRepo subdir");
+
+const clearGit = await clearGitRepo();
+ok(clearGit.gitRepo === null, "clearGitRepo clears the saved repo");
+const snapAfterClearGit = await state();
+ok(snapAfterClearGit.gitRepo === null, "state exposes null gitRepo after clearing");
+
+// ── GitHub 仓库克隆导入（需要 git，不可用时跳过） ──
+function gitAvailable() {
+  return new Promise((resolve) => {
+    execFile("git", ["--version"], { windowsHide: true }, (error) => resolve(!error));
+  });
+}
+
+if (await gitAvailable()) {
+  const repoRoot = join(tmp, "git-repo");
+  await mkdir(join(repoRoot, "skills"), { recursive: true });
+  await makeSkill(join(repoRoot, "skills"), "Remote One", "---\nname: remote-one\n---\nbody");
+  const gitRun = (args) => new Promise((resolve, reject) => {
+    execFile("git", args, { cwd: repoRoot, windowsHide: true }, (error, stdout, stderr) => {
+      if (error) reject(new Error(String(stderr || "").trim() || error.message));
+      else resolve();
+    });
+  });
+  await gitRun(["init", "-q"]);
+  await gitRun(["config", "user.email", "test@example.com"]);
+  await gitRun(["config", "user.name", "test"]);
+  await gitRun(["add", "-A"]);
+  await gitRun(["commit", "-q", "-m", "init"]);
+
+  const gitImport = await importFromGitRepo(pathToFileURL(repoRoot).href, "skills", null, {});
+  eq((gitImport.imported || []).length, 1, "importFromGitRepo clones a local repo and imports its skill");
+  ok(await resolveEntry(dshRoot, "remote-one") !== null, "cloned skill remote-one resolvable");
+} else {
+  ok(true, "git clone import test skipped because git is unavailable");
+}
 
 // 清理
 await rm(tmp, { recursive: true, force: true });
