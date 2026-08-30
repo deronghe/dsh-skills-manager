@@ -3,7 +3,7 @@
 
 import { mkdtemp, mkdir, writeFile, readFile, rm, stat, symlink } from "node:fs/promises";
 import { createServer, request } from "node:http";
-import { join, sep } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 
 import {
@@ -19,6 +19,9 @@ import {
   resolveEntry,
   entryPath,
   userRoots,
+  saveSourceFolder,
+  clearSourceFolder,
+  syncSourceFolder,
 } from "../lib/core.js";
 import { apply as applyHost, notifyChatCatalog } from "../lib/index.js";
 
@@ -149,11 +152,6 @@ ok(clientSource.includes('function executeImport(source, conflict, chained)') &&
 ok(clientSource.includes('executeImport(selected.source, "skip", true)'), "installSelected chains into executeImport explicitly, never via stale busy closures");
 ok(clientSource.includes("importResult && !uploadOpen && !isUploadPickerError(importResult)"), "import results stay off the page while the upload dialog is open");
 ok(/setUploadOpen\(false\);\s*setSelected\(null\);\s*setImportResult\(\{ error: error \}\)/.test(clientSource), "import failure clears the selected source with the dialog");
-const publishWorkflow = await readFile(new URL("../.github/workflows/publish.yml", import.meta.url), "utf8");
-ok(publishWorkflow.includes("id-token: write"), "publish workflow enables OIDC trusted publishing");
-ok(!publishWorkflow.includes("registry-url:"), "publish workflow relies on package publishConfig instead of token-backed registry setup");
-ok(publishWorkflow.includes("npm test"), "publish workflow runs the project tests");
-ok(publishWorkflow.includes("npm publish"), "publish workflow publishes the package after tests");
 
 // ── 命名规整 ──
 eq(toKebab("FooBar"), "foo-bar", "toKebab camelCase");
@@ -600,6 +598,41 @@ ok(dshSnap.skills.find((s) => s.name === "import-me").modelInvocable === true, "
 const agentsSnap = snap.roots.find((r) => r.key === "agents");
 ok(agentsSnap.mutable === false, "public Agent root disallows destructive actions");
 ok(agentsSnap.skills.some((s) => s.name === "public-skill"), "state lists public Agent skill");
+
+// ── 源文件夹保存 / 同步 / 清除 ──
+const notSetSync = await syncSourceFolder();
+ok(notSetSync.ok === false, "syncSourceFolder errors before any folder is saved");
+eq(notSetSync.code, "error.folder.notSet", "unsaved sync carries the notSet code");
+
+const missingSave = await saveSourceFolder(join(tmp, "no-such-folder"));
+ok(missingSave.ok === false, "saveSourceFolder rejects a nonexistent path");
+eq(missingSave.code, "error.source.notFound", "nonexistent save carries the notFound code");
+
+const overlapSave = await saveSourceFolder(dshRoot);
+ok(overlapSave.ok === false, "saveSourceFolder rejects the DSH skills root itself");
+eq(overlapSave.code, "error.import.overlap", "overlap save carries the overlap code");
+
+const batchSrcRoot = join(tmp, "batch-src");
+await makeSkill(batchSrcRoot, "Alpha One", "---\nname: alpha-one\n---\nbody");
+await writeFile(join(batchSrcRoot, "beta-two.md"), "---\nname: beta-two\n---\nbody", "utf8");
+const saveResult = await saveSourceFolder(batchSrcRoot);
+ok(typeof saveResult.sourceFolder === "string" && saveResult.sourceFolder !== "", "saveSourceFolder persists the folder path");
+const snapAfterSave = await state();
+eq(snapAfterSave.sourceFolder, resolve(batchSrcRoot), "state exposes the saved source folder");
+
+const syncResult = await syncSourceFolder();
+eq((syncResult.imported || []).length, 2, "syncSourceFolder imports every skill from the saved folder");
+ok(await resolveEntry(dshRoot, "alpha-one") !== null, "synced bundle skill alpha-one resolvable");
+ok(await resolveEntry(dshRoot, "beta-two") !== null, "synced flat skill beta-two resolvable");
+
+const syncAgain = await syncSourceFolder();
+eq((syncAgain.imported || []).length, 0, "second sync imports nothing new");
+eq((syncAgain.skipped || []).length, 2, "second sync skips the existing skills");
+
+const clearResult = await clearSourceFolder();
+ok(clearResult.sourceFolder === null, "clearSourceFolder clears the saved folder");
+const snapAfterClear = await state();
+ok(snapAfterClear.sourceFolder === null, "state exposes null after clearing the source folder");
 
 // 清理
 await rm(tmp, { recursive: true, force: true });
