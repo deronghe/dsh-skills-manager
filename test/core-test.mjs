@@ -592,6 +592,31 @@ ok(!emitted.some((event) => event[0] === "agent-preset/selected" && event[1] ===
   }));
   eq(concurrentResponses.reduce(function (count, payload) { return count + payload.data.imported.length; }, 0), 1, "concurrent imports perform one installation");
   eq(concurrentResponses.reduce(function (count, payload) { return count + payload.data.skipped.length; }, 0), 1, "concurrent imports serialize the second conflict check");
+
+  // ── GitHub 导入路由回归：saveGitRepo 之后必须继续执行 syncGitRepo（导入 skill） ──
+  if (await gitAvailable()) {
+    const ghRoot = join(tmp, "gh-route-repo");
+    await mkdir(join(ghRoot, "skills"), { recursive: true });
+    await makeSkill(join(ghRoot, "skills"), "Route Skill", "---\nname: route-skill\n---\nbody");
+    const ghRun = (args) => new Promise((resolve, reject) => {
+      execFile("git", args, { cwd: ghRoot, windowsHide: true }, (error, stdout, stderr) => {
+        if (error) reject(new Error(String(stderr || "").trim() || error.message));
+        else resolve();
+      });
+    });
+    await ghRun(["init", "-q"]);
+    await ghRun(["config", "user.email", "test@example.com"]);
+    await ghRun(["config", "user.name", "test"]);
+    await ghRun(["add", "-A"]);
+    await ghRun(["commit", "-q", "-m", "init"]);
+
+    const ghResponse = await fetch(api + "/github/import", { method: "POST", headers: secureHeaders, body: JSON.stringify({ url: pathToFileURL(ghRoot).href, subdir: "skills", update: false }) });
+    const ghPayload = await ghResponse.json();
+    eq(ghResponse.status, 200, "github/import route returns 200 for a valid repo");
+    eq((ghPayload.data && ghPayload.data.imported || []).length, 1, "github/import route imports the skill after saving (save must not short-circuit the import)");
+    ok(await resolveEntry(dshRoot, "route-skill") !== null, "route-imported skill route-skill resolvable");
+    await clearGitRepo();
+  }
 } finally {
   await new Promise((resolve) => server.close(resolve));
 }
