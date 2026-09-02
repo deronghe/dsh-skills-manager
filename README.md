@@ -32,7 +32,7 @@
 - Paste one sentence into DSH, Codex, or WorkBuddy and let that agent install the plugin locally.
 - Push a locally edited DSH skill back to its source GitHub repository in one click; the source repo and token are configured on the **Repository** tab.
 - Keep the settings panel organized with **Repository / Skills / About** tabs; the **About** tab shows the installed version and the latest GitHub release.
-- Release new plugin versions with `node scripts/release.mjs`, which bumps the version, tags `vX.Y.Z`, and pushes; GitHub Actions then creates the Release and publishes to npm.
+- Release new plugin versions by tagging `vX.Y.Z` and creating a GitHub Release manually; the **About** tab shows the installed version and the latest release.
 
 ## Screenshots
 

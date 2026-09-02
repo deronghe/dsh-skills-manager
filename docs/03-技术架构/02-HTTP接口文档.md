@@ -41,4 +41,4 @@
 
 `/config` 的 GET/POST 均先校验 loopback Host；POST 属于写接口，额外要求请求标记与 JSON。保存前校验：URL 必须是 `https://github.com/owner/repo` 且不得内嵌凭据；子目录只允许普通相对路径段；令牌长度不超过 512 且不含换行。
 
-`/push` 请求体为 `{ "name": "foo-bar", "dryRun": true }`（`root` 缺省为 `dsh`，公共 Agent 根被拒绝）。服务端把技能复制进来源仓库镜像（配置的 `subdir`，缺省自动识别仓库根 `skills/`），先刷新镜像到远端最新再比对；`dryRun: true` 只返回 `{ changed, files, repo, branch, destination }` 不提交不推送；实推成功返回 `{ changed, files, commit, repo, branch, destination }`，无差异返回 `changed: false`。提交信息为 `feat(skills): 更新 <名称>（由 DSH 技能管理推送）`；鉴权令牌取环境变量 `GITHUB_TOKEN` 或配置中的 `gitToken`。镜像缓存于 `$DSH_HOME\.dsh-skills-manager\repos\`。
+`/push` 请求体为 `{ "name": "foo-bar", "dryRun": true }`（`root` 缺省为 `dsh`，公共 Agent 根被拒绝）。服务端临时浅克隆来源仓库（`-c core.autocrlf=false`，配置的 `subdir` 优先，缺省自动识别仓库根 `skills/`），复制技能后先比对差异（克隆即远端最新，无需额外刷新）；`dryRun: true` 只返回 `{ changed, files, repo, branch, destination }` 不提交不推送；实推成功返回 `{ changed, files, commit, repo, branch, destination }`，无差异返回 `changed: false`。提交信息为 `feat(skills): 更新 <名称>（由 DSH 技能管理推送）`；鉴权令牌取环境变量 `GITHUB_TOKEN` 或配置中的 `gitToken`。克隆在临时目录进行，操作完成后删除。
