@@ -28,6 +28,9 @@
 - Import a plugin directory containing `SKILL.md` through the native file picker and confirm every name collision.
 - In DSH Desktop, upload a `SKILL.md` file or an entire plugin directory; the fork resolves real file paths through the Desktop preload bridge and opens the native folder chooser.
 - Paste one sentence into DSH, Codex, or WorkBuddy and let that agent install the plugin locally.
+- Push a locally edited DSH skill back to its source GitHub repository in one click; the source repo and token are configured on the **Repository** tab.
+- Keep the settings panel organized with **Repository / Skills / About** tabs; the **About** tab shows the installed version and the latest GitHub release.
+- Release new plugin versions with `node scripts/release.mjs`, which bumps the version, tags `vX.Y.Z`, and pushes; GitHub Actions then creates the Release and publishes to npm.
 
 ## Screenshots
 

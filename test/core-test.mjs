@@ -19,6 +19,10 @@ import {
   resolveEntry,
   entryPath,
   userRoots,
+  readConfig,
+  saveConfig,
+  pluginMeta,
+  pushSkillToSource,
 } from "../lib/core.js";
 import { apply as applyHost, notifyChatCatalog } from "../lib/index.js";
 
@@ -133,6 +137,13 @@ ok(clientSource.includes('.dssm-dropzone{box-sizing:border-box;display:flex;widt
 ok(clientSource.includes('.dssm-modal-actions{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:8px}'), "upload actions wrap instead of stretching the dialog");
 ok(clientSource.includes('@media (max-width:560px){.dssm-mask{padding:12px;align-items:center}'), "upload dialog stays centered on a narrow viewport");
 ok(clientSource.includes('id: "dssm-filter-search"'), "settings panel registers a skill search input");
+ok(clientSource.includes('className: "dssm-tabs"'), "settings panel organizes content into tabs");
+ok(clientSource.includes('role: "tablist"'), "tab bar declares the tablist role");
+ok(clientSource.includes('t("btn.push")'), "skill rows offer a push action");
+ok(clientSource.includes('callApi("/push"'), "client calls the push endpoint");
+ok(clientSource.includes('callApi("/config"'), "client reads and writes repository settings");
+ok(clientSource.includes('renderPushModal'), "client renders the push dialog");
+ok(clientSource.includes("aria-selected\": tab === entry.key"), "active tab is announced to assistive tech");
 ok(clientSource.includes('className: "dssm-field dssm-field-search"'), "search field follows the expert plugin filter layout");
 ok(clientSource.includes('.dssm-search-clear{'), "search input provides a visible clear control");
 ok(clientSource.includes('className: "dssm-select-trigger"'), "category filter uses the styled custom select");
@@ -581,6 +592,32 @@ ok(!emitted.some((event) => event[0] === "agent-preset/selected" && event[1] ===
   eq(unknownResponse.status, 404, "unknown mutation route returns 404");
   eq((await unknownResponse.json()).code, "error.proto.unknownAction", "404 response carries the protocol error code");
 
+  const configGet = await fetch(api + "/config");
+  eq(configGet.status, 200, "GET /config returns 200");
+  const configGetPayload = await configGet.json();
+  ok(configGetPayload.data && typeof configGetPayload.data.gitRepo === "object", "GET /config exposes gitRepo");
+  ok(!("gitToken" in configGetPayload.data), "GET /config never exposes the stored token");
+  const configEvilHost = await requestJson(api + "/config", "GET", { host: "evil.example" });
+  eq(configEvilHost.status, 403, "GET /config rejects a non-loopback Host");
+  const metaGet = await fetch(api + "/meta");
+  eq(metaGet.status, 200, "GET /meta returns 200");
+  const metaPayload = await metaGet.json();
+  eq(metaPayload.data.version, packageJson.version, "GET /meta exposes the current plugin version");
+
+  const pushReadonly = await fetch(api + "/push", { method: "POST", headers: secureHeaders, body: JSON.stringify({ name: "public-skill", root: "agents", dryRun: true }) });
+  eq(pushReadonly.status, 400, "push route rejects the public Agent root");
+  eq((await pushReadonly.json()).code, "error.root.readonly", "push readonly carries the readonly code");
+
+  const pushNoRepo = await fetch(api + "/push", { method: "POST", headers: secureHeaders, body: JSON.stringify({ name: "http-skill", dryRun: true }) });
+  eq(pushNoRepo.status, 400, "push without a configured repository is an error");
+  eq((await pushNoRepo.json()).code, "error.push.noRepo", "no-repo push carries the noRepo code");
+
+  const configSave = await fetch(api + "/config", { method: "POST", headers: secureHeaders, body: JSON.stringify({ gitRepo: { url: "https://github.com/deronghe/skills", subdir: "" } }) });
+  eq(configSave.status, 200, "POST /config accepts a valid GitHub URL");
+  const configBad = await fetch(api + "/config", { method: "POST", headers: secureHeaders, body: JSON.stringify({ gitRepo: { url: "https://gitlab.com/owner/repo" } }) });
+  eq(configBad.status, 400, "POST /config rejects a non-GitHub URL");
+  eq((await configBad.json()).code, "error.config.invalidUrl", "invalid config URL carries the code");
+
   const concurrentResponses = await Promise.all([1, 2].map(function () {
     return fetch(api + "/import", { method: "POST", headers: secureHeaders, body: JSON.stringify({ source: concurrentImportSource }) }).then(function (response) { return response.json(); });
   }));
@@ -600,6 +637,33 @@ ok(dshSnap.skills.find((s) => s.name === "import-me").modelInvocable === true, "
 const agentsSnap = snap.roots.find((r) => r.key === "agents");
 ok(agentsSnap.mutable === false, "public Agent root disallows destructive actions");
 ok(agentsSnap.skills.some((s) => s.name === "public-skill"), "state lists public Agent skill");
+
+// ── 配置、元信息与推送守卫（不触网）──
+const savedConfig = await readConfig();
+eq(savedConfig.gitRepo.url, "https://github.com/deronghe/skills", "readConfig returns the URL saved over HTTP");
+const invalidUrlSave = await saveConfig({ gitRepo: { url: "https://gitlab.com/owner/repo" } });
+ok(invalidUrlSave.ok === false, "saveConfig rejects a non-GitHub URL");
+eq(invalidUrlSave.code, "error.config.invalidUrl", "invalid URL carries the config code");
+const traversalSubdir = await saveConfig({ gitRepo: { subdir: "../escape" } });
+ok(traversalSubdir.ok === false, "saveConfig rejects a traversal subdirectory");
+eq(traversalSubdir.code, "error.config.invalidSubdir", "traversal subdir carries the config code");
+const tokenSave = await saveConfig({ gitToken: "ghp_local_test_token" });
+ok(tokenSave.ok !== false, "saveConfig stores a token");
+eq((await readConfig()).gitToken, "ghp_local_test_token", "readConfig returns the stored token");
+eq(tokenSave.gitRepo.url, "https://github.com/deronghe/skills", "token save keeps the repository URL");
+const tokenClear = await saveConfig({ gitToken: null });
+ok(tokenClear.ok !== false, "saveConfig clears a token on null");
+eq((await readConfig()).gitToken, "", "cleared token is no longer readable");
+const meta = await pluginMeta();
+ok(meta.version !== "", "pluginMeta exposes the plugin version");
+ok(/github\.com/.test(meta.repository), "pluginMeta exposes the project repository");
+const agentsPush = await pushSkillToSource(agentsRoot, "public-skill", { dryRun: true });
+ok(agentsPush.ok === false, "push rejects the public Agent root");
+eq(agentsPush.code, "error.root.readonly", "push readonly carries the readonly code");
+eq(agentsPush.params && agentsPush.params.action, "push", "push readonly params.action is push");
+const missingPush = await pushSkillToSource(dshRoot, "no-such-skill", { dryRun: true });
+ok(missingPush.ok === false, "push of a missing skill is an error");
+eq(missingPush.code, "error.skill.notFound", "push missing skill carries the notFound code");
 
 // 清理
 await rm(tmp, { recursive: true, force: true });

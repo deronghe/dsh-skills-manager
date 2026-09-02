@@ -28,6 +28,9 @@
 - 使用系统文件选择器导入包含 `SKILL.md` 的插件目录，并对同名覆盖强制确认。
 - 在 DSH Desktop 中可上传单个 `SKILL.md` 文件或整个插件目录；本 fork 通过 Desktop preload 桥解析真实文件路径并打开系统原生目录选择框。
 - 可把一句话复制到 DSH、Codex 或 WorkBuddy，让对方代装到本机 DSH。
+- 一键把本地改动的 DSH 技能推送回来源 GitHub 仓库；来源仓库与令牌在「仓库」页配置。
+- 设置面板按「仓库 / 技能 / 关于」页签分门别类；「关于」页展示插件当前版本与最新 GitHub Release。
+- 新版本用 `node scripts/release.mjs` 发布：自动升版本号、打 `vX.Y.Z` 标签并推送，GitHub Actions 随后创建 Release 并发布到 npm。
 
 ## 界面预览
 
