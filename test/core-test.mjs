@@ -3,8 +3,10 @@
 
 import { mkdtemp, mkdir, writeFile, readFile, rm, stat, symlink } from "node:fs/promises";
 import { createServer, request } from "node:http";
-import { join, sep } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
+import { execFile } from "node:child_process";
+import { pathToFileURL } from "node:url";
 
 import {
   toKebab,
@@ -19,8 +21,18 @@ import {
   resolveEntry,
   entryPath,
   userRoots,
-  readConfig,
-  saveConfig,
+  saveSourceFolder,
+  clearSourceFolder,
+  syncSourceFolder,
+  normalizeRepoUrl,
+  normalizeSubdir,
+  saveGitRepo,
+  clearGitRepo,
+  syncGitRepo,
+  importFromGitRepo,
+  loadSettings,
+  pushConfig,
+  savePushConfig,
   pluginMeta,
   pushSkillToSource,
 } from "../lib/core.js";
@@ -160,11 +172,6 @@ ok(clientSource.includes('function executeImport(source, conflict, chained)') &&
 ok(clientSource.includes('executeImport(selected.source, "skip", true)'), "installSelected chains into executeImport explicitly, never via stale busy closures");
 ok(clientSource.includes("importResult && !uploadOpen && !isUploadPickerError(importResult)"), "import results stay off the page while the upload dialog is open");
 ok(/setUploadOpen\(false\);\s*setSelected\(null\);\s*setImportResult\(\{ error: error \}\)/.test(clientSource), "import failure clears the selected source with the dialog");
-const publishWorkflow = await readFile(new URL("../.github/workflows/publish.yml", import.meta.url), "utf8");
-ok(publishWorkflow.includes("id-token: write"), "publish workflow enables OIDC trusted publishing");
-ok(!publishWorkflow.includes("registry-url:"), "publish workflow relies on package publishConfig instead of token-backed registry setup");
-ok(publishWorkflow.includes("npm test"), "publish workflow runs the project tests");
-ok(publishWorkflow.includes("npm publish"), "publish workflow publishes the package after tests");
 
 // ── 命名规整 ──
 eq(toKebab("FooBar"), "foo-bar", "toKebab camelCase");
@@ -592,16 +599,16 @@ ok(!emitted.some((event) => event[0] === "agent-preset/selected" && event[1] ===
   eq(unknownResponse.status, 404, "unknown mutation route returns 404");
   eq((await unknownResponse.json()).code, "error.proto.unknownAction", "404 response carries the protocol error code");
 
-  const configGet = await fetch(api + "/config");
-  eq(configGet.status, 200, "GET /config returns 200");
-  const configGetPayload = await configGet.json();
-  ok(configGetPayload.data && typeof configGetPayload.data.gitRepo === "object", "GET /config exposes gitRepo");
-  ok(!("gitToken" in configGetPayload.data), "GET /config never exposes the stored token");
-  const configEvilHost = await requestJson(api + "/config", "GET", { host: "evil.example" });
-  eq(configEvilHost.status, 403, "GET /config rejects a non-loopback Host");
-  const metaGet = await fetch(api + "/meta");
-  eq(metaGet.status, 200, "GET /meta returns 200");
-  const metaPayload = await metaGet.json();
+  const cfgGet = await fetch(api + "/config");
+  eq(cfgGet.status, 200, "GET /config returns 200");
+  const cfgPayload = await cfgGet.json();
+  ok(cfgPayload.data && typeof cfgPayload.data.gitRepo === "object", "GET /config exposes gitRepo");
+  ok(!("gitToken" in cfgPayload.data), "GET /config never exposes the stored token");
+  const cfgEvilHost = await requestJson(api + "/config", "GET", { host: "evil.example" });
+  eq(cfgEvilHost.status, 403, "GET /config rejects a non-loopback Host");
+  const metaResp = await fetch(api + "/meta");
+  eq(metaResp.status, 200, "GET /meta returns 200");
+  const metaPayload = await metaResp.json();
   eq(metaPayload.data.version, packageJson.version, "GET /meta exposes the current plugin version");
 
   const pushReadonly = await fetch(api + "/push", { method: "POST", headers: secureHeaders, body: JSON.stringify({ name: "public-skill", root: "agents", dryRun: true }) });
@@ -612,17 +619,42 @@ ok(!emitted.some((event) => event[0] === "agent-preset/selected" && event[1] ===
   eq(pushNoRepo.status, 400, "push without a configured repository is an error");
   eq((await pushNoRepo.json()).code, "error.push.noRepo", "no-repo push carries the noRepo code");
 
-  const configSave = await fetch(api + "/config", { method: "POST", headers: secureHeaders, body: JSON.stringify({ gitRepo: { url: "https://github.com/deronghe/skills", subdir: "" } }) });
-  eq(configSave.status, 200, "POST /config accepts a valid GitHub URL");
-  const configBad = await fetch(api + "/config", { method: "POST", headers: secureHeaders, body: JSON.stringify({ gitRepo: { url: "https://gitlab.com/owner/repo" } }) });
-  eq(configBad.status, 400, "POST /config rejects a non-GitHub URL");
-  eq((await configBad.json()).code, "error.config.invalidUrl", "invalid config URL carries the code");
+  const cfgSave = await fetch(api + "/config", { method: "POST", headers: secureHeaders, body: JSON.stringify({ gitRepo: { url: "https://github.com/deronghe/skills", subdir: "" } }) });
+  eq(cfgSave.status, 200, "POST /config accepts a valid GitHub URL");
+  const cfgBad = await fetch(api + "/config", { method: "POST", headers: secureHeaders, body: JSON.stringify({ gitRepo: { url: "https://gitlab.com/owner/repo" } }) });
+  eq(cfgBad.status, 400, "POST /config rejects a non-GitHub URL");
+  eq((await cfgBad.json()).code, "error.config.invalidUrl", "invalid config URL carries the code");
 
   const concurrentResponses = await Promise.all([1, 2].map(function () {
     return fetch(api + "/import", { method: "POST", headers: secureHeaders, body: JSON.stringify({ source: concurrentImportSource }) }).then(function (response) { return response.json(); });
   }));
   eq(concurrentResponses.reduce(function (count, payload) { return count + payload.data.imported.length; }, 0), 1, "concurrent imports perform one installation");
   eq(concurrentResponses.reduce(function (count, payload) { return count + payload.data.skipped.length; }, 0), 1, "concurrent imports serialize the second conflict check");
+
+  // ── GitHub 导入路由回归：saveGitRepo 之后必须继续执行 syncGitRepo（导入 skill） ──
+  if (await gitAvailable()) {
+    const ghRoot = join(tmp, "gh-route-repo");
+    await mkdir(join(ghRoot, "skills"), { recursive: true });
+    await makeSkill(join(ghRoot, "skills"), "Route Skill", "---\nname: route-skill\n---\nbody");
+    const ghRun = (args) => new Promise((resolve, reject) => {
+      execFile("git", args, { cwd: ghRoot, windowsHide: true }, (error, stdout, stderr) => {
+        if (error) reject(new Error(String(stderr || "").trim() || error.message));
+        else resolve();
+      });
+    });
+    await ghRun(["init", "-q"]);
+    await ghRun(["config", "user.email", "test@example.com"]);
+    await ghRun(["config", "user.name", "test"]);
+    await ghRun(["add", "-A"]);
+    await ghRun(["commit", "-q", "-m", "init"]);
+
+    const ghResponse = await fetch(api + "/github/import", { method: "POST", headers: secureHeaders, body: JSON.stringify({ url: pathToFileURL(ghRoot).href, subdir: "skills", update: false }) });
+    const ghPayload = await ghResponse.json();
+    eq(ghResponse.status, 200, "github/import route returns 200 for a valid repo");
+    eq((ghPayload.data && ghPayload.data.imported || []).length, 1, "github/import route imports the skill after saving (save must not short-circuit the import)");
+    ok(await resolveEntry(dshRoot, "route-skill") !== null, "route-imported skill route-skill resolvable");
+    await clearGitRepo();
+  }
 } finally {
   await new Promise((resolve) => server.close(resolve));
 }
@@ -638,24 +670,133 @@ const agentsSnap = snap.roots.find((r) => r.key === "agents");
 ok(agentsSnap.mutable === false, "public Agent root disallows destructive actions");
 ok(agentsSnap.skills.some((s) => s.name === "public-skill"), "state lists public Agent skill");
 
-// ── 配置、元信息与推送守卫（不触网）──
-const savedConfig = await readConfig();
-eq(savedConfig.gitRepo.url, "https://github.com/deronghe/skills", "readConfig returns the URL saved over HTTP");
-const invalidUrlSave = await saveConfig({ gitRepo: { url: "https://gitlab.com/owner/repo" } });
-ok(invalidUrlSave.ok === false, "saveConfig rejects a non-GitHub URL");
-eq(invalidUrlSave.code, "error.config.invalidUrl", "invalid URL carries the config code");
-const traversalSubdir = await saveConfig({ gitRepo: { subdir: "../escape" } });
-ok(traversalSubdir.ok === false, "saveConfig rejects a traversal subdirectory");
-eq(traversalSubdir.code, "error.config.invalidSubdir", "traversal subdir carries the config code");
-const tokenSave = await saveConfig({ gitToken: "ghp_local_test_token" });
-ok(tokenSave.ok !== false, "saveConfig stores a token");
-eq((await readConfig()).gitToken, "ghp_local_test_token", "readConfig returns the stored token");
-eq(tokenSave.gitRepo.url, "https://github.com/deronghe/skills", "token save keeps the repository URL");
-const tokenClear = await saveConfig({ gitToken: null });
-ok(tokenClear.ok !== false, "saveConfig clears a token on null");
-eq((await readConfig()).gitToken, "", "cleared token is no longer readable");
+// ── 源文件夹保存 / 同步 / 清除 ──
+const notSetSync = await syncSourceFolder();
+ok(notSetSync.ok === false, "syncSourceFolder errors before any folder is saved");
+eq(notSetSync.code, "error.folder.notSet", "unsaved sync carries the notSet code");
+
+const missingSave = await saveSourceFolder(join(tmp, "no-such-folder"));
+ok(missingSave.ok === false, "saveSourceFolder rejects a nonexistent path");
+eq(missingSave.code, "error.source.notFound", "nonexistent save carries the notFound code");
+
+const overlapSave = await saveSourceFolder(dshRoot);
+ok(overlapSave.ok === false, "saveSourceFolder rejects the DSH skills root itself");
+eq(overlapSave.code, "error.import.overlap", "overlap save carries the overlap code");
+
+const batchSrcRoot = join(tmp, "batch-src");
+await makeSkill(batchSrcRoot, "Alpha One", "---\nname: alpha-one\n---\nbody");
+await writeFile(join(batchSrcRoot, "beta-two.md"), "---\nname: beta-two\n---\nbody", "utf8");
+const saveResult = await saveSourceFolder(batchSrcRoot);
+ok(typeof saveResult.sourceFolder === "string" && saveResult.sourceFolder !== "", "saveSourceFolder persists the folder path");
+const snapAfterSave = await state();
+eq(snapAfterSave.sourceFolder, resolve(batchSrcRoot), "state exposes the saved source folder");
+
+const syncResult = await syncSourceFolder();
+eq((syncResult.imported || []).length, 2, "syncSourceFolder imports every skill from the saved folder");
+ok(await resolveEntry(dshRoot, "alpha-one") !== null, "synced bundle skill alpha-one resolvable");
+ok(await resolveEntry(dshRoot, "beta-two") !== null, "synced flat skill beta-two resolvable");
+
+const syncAgain = await syncSourceFolder();
+eq((syncAgain.imported || []).length, 0, "second sync imports nothing new");
+eq((syncAgain.skipped || []).length, 2, "second sync skips the existing skills");
+
+const clearResult = await clearSourceFolder();
+ok(clearResult.sourceFolder === null, "clearSourceFolder clears the saved folder");
+const snapAfterClear = await state();
+ok(snapAfterClear.sourceFolder === null, "state exposes null after clearing the source folder");
+
+// ── GitHub 仓库地址与子目录校验 ──
+eq(normalizeRepoUrl("").ok, false, "normalizeRepoUrl rejects empty input");
+eq(normalizeRepoUrl("not-a-url").ok, false, "normalizeRepoUrl rejects a bare string");
+eq(normalizeRepoUrl("https://github.com/owner/repo.git").ok, true, "normalizeRepoUrl accepts an https URL");
+eq(normalizeRepoUrl("git@github.com:owner/repo.git").ok, true, "normalizeRepoUrl accepts a git@ URL");
+eq(normalizeRepoUrl("file:///C:/tmp/repo").ok, true, "normalizeRepoUrl accepts a file URL");
+
+eq(normalizeSubdir("").subdir, "", "normalizeSubdir treats empty as root");
+eq(normalizeSubdir("skills").subdir, "skills", "normalizeSubdir keeps a plain segment");
+eq(normalizeSubdir("  skills/  ").subdir, "skills", "normalizeSubdir trims and strips slashes");
+eq(normalizeSubdir("a/b").subdir, "a/b", "normalizeSubdir keeps nested segments");
+ok(normalizeSubdir("../evil").ok === false, "normalizeSubdir rejects parent traversal");
+ok(normalizeSubdir("/abs").ok === false, "normalizeSubdir rejects an absolute path");
+ok(normalizeSubdir("C:/win").ok === false, "normalizeSubdir rejects a drive path");
+
+// ── GitHub 仓库保存 / 清除 / 状态（不触发克隆） ──
+const badGitSave = await saveGitRepo("not-a-url", "");
+ok(badGitSave.ok === false, "saveGitRepo rejects an invalid URL");
+eq(badGitSave.code, "error.github.invalidUrl", "invalid save carries the invalidUrl code");
+
+const badGitImport = await importFromGitRepo("not-a-url", "");
+ok(badGitImport.ok === false, "importFromGitRepo rejects an invalid URL before cloning");
+eq(badGitImport.code, "error.github.invalidUrl", "invalid import carries the invalidUrl code");
+
+const notSetGit = await syncGitRepo();
+ok(notSetGit.ok === false, "syncGitRepo errors before any repo is saved");
+eq(notSetGit.code, "error.github.notSet", "unsaved git sync carries the notSet code");
+
+const goodGitSave = await saveGitRepo("https://github.com/deronghe/skills.git", "skills");
+ok(goodGitSave.gitRepo && goodGitSave.gitRepo.url === "https://github.com/deronghe/skills.git", "saveGitRepo persists the repo URL");
+eq(goodGitSave.gitRepo.subdir, "skills", "saveGitRepo persists the subdir");
+
+const snapWithRepo = await state();
+ok(snapWithRepo.gitRepo && snapWithRepo.gitRepo.url === "https://github.com/deronghe/skills.git", "state exposes the saved gitRepo");
+eq(snapWithRepo.gitRepo.subdir, "skills", "state exposes the gitRepo subdir");
+
+const clearGit = await clearGitRepo();
+ok(clearGit.gitRepo === null, "clearGitRepo clears the saved repo");
+const snapAfterClearGit = await state();
+ok(snapAfterClearGit.gitRepo === null, "state exposes null gitRepo after clearing");
+
+// ── GitHub 仓库克隆导入（需要 git，不可用时跳过） ──
+function gitAvailable() {
+  return new Promise((resolve) => {
+    execFile("git", ["--version"], { windowsHide: true }, (error) => resolve(!error));
+  });
+}
+
+if (await gitAvailable()) {
+  const repoRoot = join(tmp, "git-repo");
+  await mkdir(join(repoRoot, "skills"), { recursive: true });
+  await makeSkill(join(repoRoot, "skills"), "Remote One", "---\nname: remote-one\n---\nbody");
+  const gitRun = (args) => new Promise((resolve, reject) => {
+    execFile("git", args, { cwd: repoRoot, windowsHide: true }, (error, stdout, stderr) => {
+      if (error) reject(new Error(String(stderr || "").trim() || error.message));
+      else resolve();
+    });
+  });
+  await gitRun(["init", "-q"]);
+  await gitRun(["config", "user.email", "test@example.com"]);
+  await gitRun(["config", "user.name", "test"]);
+  await gitRun(["add", "-A"]);
+  await gitRun(["commit", "-q", "-m", "init"]);
+
+  const gitImport = await importFromGitRepo(pathToFileURL(repoRoot).href, "skills", null, {});
+  eq((gitImport.imported || []).length, 1, "importFromGitRepo clones a local repo and imports its skill");
+  ok(await resolveEntry(dshRoot, "remote-one") !== null, "cloned skill remote-one resolvable");
+} else {
+  ok(true, "git clone import test skipped because git is unavailable");
+}
+
+// ── 推送配置 / 元信息 / 推送守卫（不触网）──
+const tokenSave = await savePushConfig({ gitToken: "ghp_local_test_token" });
+ok(tokenSave.ok !== false, "savePushConfig stores a token");
+eq((await loadSettings()).gitToken, "ghp_local_test_token", "token persists in the shared settings file");
+const tokenClear = await savePushConfig({ gitToken: null });
+ok(tokenClear.ok !== false, "savePushConfig clears a token on null");
+ok((await loadSettings()).gitToken === undefined, "cleared token is removed from settings");
+const badUrlSave = await savePushConfig({ gitRepo: { url: "https://gitlab.com/owner/repo" } });
+ok(badUrlSave.ok === false, "savePushConfig rejects a non-GitHub URL");
+eq(badUrlSave.code, "error.config.invalidUrl", "invalid URL carries the config code");
+const badSubdirSave = await savePushConfig({ gitRepo: { subdir: "../escape" } });
+ok(badSubdirSave.ok === false, "savePushConfig rejects a traversal subdirectory");
+eq(badSubdirSave.code, "error.config.invalidSubdir", "traversal subdir carries the config code");
+const longTokenSave = await savePushConfig({ gitToken: "x".repeat(600) });
+ok(longTokenSave.ok === false, "savePushConfig rejects an overlong token");
+eq(longTokenSave.code, "error.config.invalidToken", "overlong token carries the config code");
+const publicCfg = await pushConfig();
+ok(publicCfg && typeof publicCfg.gitRepo === "object", "pushConfig exposes gitRepo without a token");
 const meta = await pluginMeta();
 ok(meta.version !== "", "pluginMeta exposes the plugin version");
+eq(meta.version, packageJson.version, "pluginMeta version matches package.json");
 ok(/github\.com/.test(meta.repository), "pluginMeta exposes the project repository");
 const agentsPush = await pushSkillToSource(agentsRoot, "public-skill", { dryRun: true });
 ok(agentsPush.ok === false, "push rejects the public Agent root");

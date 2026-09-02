@@ -27,6 +27,8 @@
 - Keep shared Agent skills strictly read-only and never change their global metadata.
 - Import a plugin directory containing `SKILL.md` through the native file picker and confirm every name collision.
 - In DSH Desktop, upload a `SKILL.md` file or an entire plugin directory; the fork resolves real file paths through the Desktop preload bridge and opens the native folder chooser.
+- Save a local source folder, then click **Refresh folder** to scan it and import every skill into DSH (same-name skills are skipped, never overwritten).
+- Import skills from a GitHub (or any Git) remote repository by URL — optionally scoped to a subdirectory — and **Update** to re-pull and overwrite same-name skills.
 - Paste one sentence into DSH, Codex, or WorkBuddy and let that agent install the plugin locally.
 - Push a locally edited DSH skill back to its source GitHub repository in one click; the source repo and token are configured on the **Repository** tab.
 - Keep the settings panel organized with **Repository / Skills / About** tabs; the **About** tab shows the installed version and the latest GitHub release.
@@ -137,6 +139,10 @@ Open **Settings → Skills**, then use the panel as follows:
 | Upload a plugin | Select **Upload**, then choose the plugin directory’s `SKILL.md`. Its scripts and resources are copied too. | DSH-local skills only |
 | Choose the directory | If the selected file has no usable path, choose the directory containing `SKILL.md`. | DSH-local skills only |
 | Replace or delete | Confirm a name collision, or select **Delete** for an unneeded local skill. | DSH-local skills only |
+| Save a source folder | Select **Choose folder** to persist a local folder, then **Refresh folder** to scan and import its skills (same-name skills are skipped). | DSH-local skills only |
+| Clear the source folder | Select **Clear** to forget the saved folder; this never deletes the skills already imported. | DSH-local skills only |
+| Import from a Git repo | Enter a repository URL (and optional subdirectory), then select **Import** to clone and import its skills. | DSH-local skills only |
+| Update from a Git repo | Select **Update** to re-pull the saved repository and overwrite same-name skills with the latest version. | DSH-local skills only |
 | Inspect shared skills | Review shared Agent skills without changing their metadata. | Read-only |
 
 ![Delete plugin confirmation](assets/screenshots/delete-plugin.png)
