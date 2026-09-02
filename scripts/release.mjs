@@ -17,13 +17,20 @@ import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const packagePath = join(root, "package.json");
+const token = process.env.GITHUB_TOKEN || "";
+
+/** 错误信息中的令牌一律脱敏，避免推送失败时把凭据写进日志或终端。 */
+function redact(text) {
+  if (!token || typeof text !== "string") return text;
+  return text.split(token).join("[REDACTED]");
+}
 
 function run(args, options = {}) {
   try {
     return execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...options }).trim();
   } catch (error) {
     const output = [error.stdout, error.stderr].filter(Boolean).join("\n").trim();
-    throw new Error(`git ${args.join(" ")} 失败：${output || error.message}`);
+    throw new Error(`git ${args.join(" ")} 失败：${redact(output || error.message)}`);
   }
 }
 
@@ -37,7 +44,6 @@ function bump(version, type) {
 }
 
 const type = (process.argv[2] || "minor").toLowerCase();
-const token = process.env.GITHUB_TOKEN || "";
 if (!token) throw new Error("未设置 GITHUB_TOKEN 环境变量");
 
 const branch = run(["branch", "--show-current"]);
