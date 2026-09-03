@@ -36,6 +36,9 @@ import {
   importSavedRepoSkill,
   importRepoSkills,
   importSavedRepoSkills,
+  listRepos,
+  addRepo,
+  removeRepo,
   loadSettings,
   pushConfig,
   savePushConfig,
@@ -690,6 +693,9 @@ ok(!emitted.some((event) => event[0] === "agent-preset/selected" && event[1] ===
 
 // ── 仓库技能列表与单个导入（本地 file:// 仓库，需要 git，不可用时跳过） ──
 if (await gitAvailable()) {
+  // 清空历史导入仓库，确保本块从「无仓库」状态开始（HTTP 回归段可能已迁移出仓库）。
+  const leftoverRepos = ((await listRepos()).repos || []);
+  for (const leftover of leftoverRepos) await removeRepo(leftover.id);
   const repoRoot = join(tmp, "gh-one-repo");
   await mkdir(join(repoRoot, "skills"), { recursive: true });
   await makeSkill(join(repoRoot, "skills"), "Gamma Three", "---\nname: gamma-three\n---\nbody");
@@ -916,6 +922,56 @@ ok(isTransientNetworkError("could not resolve host: github.com") === true, "tran
 ok(isTransientNetworkError("") === false, "transient classifier rejects empty text");
 ok(isTransientNetworkError("Repository not found.") === false, "transient classifier rejects repo-not-found");
 ok(isTransientNetworkError("remote: Invalid username or password") === false, "transient classifier rejects credential failures");
+
+// ── 多仓库管理：listRepos / addRepo / removeRepo 与按 id 浏览/导入（本地 file:// 仓库） ──
+if (await gitAvailable()) {
+  const leftoverRepos2 = ((await listRepos()).repos || []);
+  for (const leftover of leftoverRepos2) await removeRepo(leftover.id);
+  const mrRoot = join(tmp, "gh-multi-repo");
+  await mkdir(join(mrRoot, "skills"), { recursive: true });
+  await makeSkill(join(mrRoot, "skills"), "Zeta One", "---\nname: zeta-one\n---\nbody");
+  const mrRun = (args) => new Promise((resolve, reject) => {
+    execFile("git", args, { cwd: mrRoot, windowsHide: true }, (error, stdout, stderr) => {
+      if (error) reject(new Error(String(stderr || "").trim() || error.message));
+      else resolve();
+    });
+  });
+  await mrRun(["init", "-q"]);
+  await mrRun(["config", "user.email", "test@example.com"]);
+  await mrRun(["config", "user.name", "test"]);
+  await mrRun(["add", "-A"]);
+  await mrRun(["commit", "-q", "-m", "init"]);
+  const mrUrl = pathToFileURL(mrRoot).href;
+
+  const beforeRepos = await listRepos();
+  ok(Array.isArray(beforeRepos.repos), "listRepos returns a repos array");
+
+  const added = await addRepo(mrUrl, "skills", "zeta");
+  ok(added.ok !== false && added.repo && added.repo.id, "addRepo adds a repository with an id");
+  const dup = await addRepo(mrUrl, "skills");
+  ok(dup.ok === false, "addRepo rejects a duplicate url+subdir");
+  eq(dup.code, "error.repo.duplicate", "duplicate repo carries the duplicate code");
+
+  const reposAfter = await listRepos();
+  eq((reposAfter.repos || []).length, 1, "listRepos lists the added repository");
+  eq(reposAfter.repos[0].skillCount, null, "newly added repo has no cached skill count");
+
+  const listed = await listSavedRepoSkills(added.repo.id);
+  ok(listed.ok === true && listed.skills.length === 1, "listSavedRepoSkills lists skills for a repo id");
+
+  const cached = await listRepos();
+  eq(cached.repos[0].skillCount, 1, "listing a repo caches its skill count");
+
+  const importById = await importSavedRepoSkill("Zeta One", null, { repo: added.repo.id });
+  ok(importById.imported && importById.imported.length === 1, "importSavedRepoSkill imports from a repo id");
+  ok(await resolveEntry(dshRoot, "zeta-one") !== null, "repo-id imported skill resolvable");
+
+  const removed = await removeRepo(added.repo.id);
+  eq((removed.repos || []).length, 0, "removeRepo removes the repository");
+  const notFoundRepo = await removeRepo(added.repo.id);
+  ok(notFoundRepo.ok === false, "removeRepo rejects an unknown repo id");
+  eq(notFoundRepo.code, "error.repo.notFound", "unknown repo id carries the notFound code");
+}
 
 // 清理
 await rm(tmp, { recursive: true, force: true });

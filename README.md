@@ -29,6 +29,7 @@
 - In DSH Desktop, upload a `SKILL.md` file or an entire plugin directory; the fork resolves real file paths through the Desktop preload bridge and opens the native folder chooser.
 - Import skills from a GitHub (or any Git) remote repository by URL — optionally scoped to a subdirectory — and **Update** to re-pull and overwrite same-name skills.
 - On the **Repository** tab, browse every skill of the saved repository and import them selectively: tick a checkbox column to multi-select, then **Import selected** or **Update selected**; a single row also has its own **Import**/**Update** action.
+- Manage multiple source repositories: add, name, switch, and remove them on the **Repository** tab; each entry shows how many skills it contains, and clicking one filters the skill list to that repository.
 - Paste one sentence into DSH, Codex, or WorkBuddy and let that agent install the plugin locally.
 - Push a locally edited DSH skill back to its source GitHub repository in one click; the source repo and token are configured on the **Repository** tab.
 - Keep the settings panel organized with **Repository / Skills / About** tabs; the **About** tab shows the installed version and the latest GitHub release.
