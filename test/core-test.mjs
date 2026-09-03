@@ -30,6 +30,10 @@ import {
   clearGitRepo,
   syncGitRepo,
   importFromGitRepo,
+  listRepoSkills,
+  listSavedRepoSkills,
+  importRepoSkill,
+  importSavedRepoSkill,
   loadSettings,
   pushConfig,
   savePushConfig,
@@ -654,10 +658,90 @@ ok(!emitted.some((event) => event[0] === "agent-preset/selected" && event[1] ===
     eq(ghResponse.status, 200, "github/import route returns 200 for a valid repo");
     eq((ghPayload.data && ghPayload.data.imported || []).length, 1, "github/import route imports the skill after saving (save must not short-circuit the import)");
     ok(await resolveEntry(dshRoot, "route-skill") !== null, "route-imported skill route-skill resolvable");
+
+    const skillsList = await fetch(api + "/github/skills");
+    const skillsPayload = await skillsList.json();
+    eq(skillsList.status, 200, "GET /github/skills returns 200 for the saved repo");
+    eq((skillsPayload.data && skillsPayload.data.skills || []).length, 1, "github/skills lists the saved repo skills");
+    eq(skillsPayload.data.skills[0].name, "Route Skill", "github/skills reports the raw repository entry name");
+    eq(skillsPayload.data.skills[0].installed, true, "github/skills matches installed by the kebab-cased local name");
+
+    const oneMore = await fetch(api + "/github/import-one", { method: "POST", headers: secureHeaders, body: JSON.stringify({ name: "Route Skill" }) });
+    const oneMorePayload = await oneMore.json();
+    eq(oneMore.status, 200, "POST /github/import-one returns 200 for an existing skill");
+    eq(((oneMorePayload.data && oneMorePayload.data.skipped) || []).length, 1, "import-one skips a locally installed skill by default");
+    const updateOne = await fetch(api + "/github/import-one", { method: "POST", headers: secureHeaders, body: JSON.stringify({ name: "Route Skill", update: true }) });
+    const updateOnePayload = await updateOne.json();
+    eq(updateOne.status, 200, "POST /github/import-one returns 200 with update=true");
+    eq(updateOnePayload.data.imported[0].overwritten, true, "import-one with update=true overwrites the installed skill");
     await clearGitRepo();
   }
 } finally {
   await new Promise((resolve) => server.close(resolve));
+}
+
+// ── 仓库技能列表与单个导入（本地 file:// 仓库，需要 git，不可用时跳过） ──
+if (await gitAvailable()) {
+  const repoRoot = join(tmp, "gh-one-repo");
+  await mkdir(join(repoRoot, "skills"), { recursive: true });
+  await makeSkill(join(repoRoot, "skills"), "Gamma Three", "---\nname: gamma-three\n---\nbody");
+  await writeFile(join(repoRoot, "skills", "delta-four.md"), "---\nname: delta-four\n---\nbody", "utf8");
+  const ghRun = (args) => new Promise((resolve, reject) => {
+    execFile("git", args, { cwd: repoRoot, windowsHide: true }, (error, stdout, stderr) => {
+      if (error) reject(new Error(String(stderr || "").trim() || error.message));
+      else resolve();
+    });
+  });
+  await ghRun(["init", "-q"]);
+  await ghRun(["config", "user.email", "test@example.com"]);
+  await ghRun(["config", "user.name", "test"]);
+  await ghRun(["add", "-A"]);
+  await ghRun(["commit", "-q", "-m", "init"]);
+  const oneRepoUrl = pathToFileURL(repoRoot).href;
+
+  const listBefore = await listRepoSkills(oneRepoUrl, "skills");
+  ok(listBefore.ok === true, "listRepoSkills lists a valid repo");
+  eq((listBefore.skills || []).length, 2, "listRepoSkills finds every skill in the repo");
+  eq(listBefore.skills.map((s) => s.name).join(","), "delta-four,Gamma Three", "listRepoSkills sorts entries by name");
+  ok(listBefore.skills.every((s) => s.installed === false), "listRepoSkills reports nothing installed before import");
+
+  const singleImport = await importRepoSkill(oneRepoUrl, "skills", "Gamma Three");
+  ok(singleImport.imported && singleImport.imported.length === 1, "importRepoSkill imports the chosen skill");
+  eq(singleImport.imported[0].name, "gamma-three", "importRepoSkill kebab-cases the local name");
+  ok(await resolveEntry(dshRoot, "gamma-three") !== null, "single-imported skill resolvable");
+  ok(await resolveEntry(dshRoot, "delta-four") === null, "single import leaves the other repo skill untouched");
+
+  const listAfter = await listRepoSkills(oneRepoUrl, "skills");
+  const gammaItem = listAfter.skills.find((s) => s.name === "Gamma Three");
+  ok(gammaItem && gammaItem.installed === true, "listRepoSkills matches installed by the kebab-cased local name");
+  ok(gammaItem && gammaItem.enabled === true, "listRepoSkills reports the imported skill enabled");
+
+  const repeatSkip = await importRepoSkill(oneRepoUrl, "skills", "Gamma Three");
+  eq(((repeatSkip && repeatSkip.skipped) || []).length, 1, "default single import skips an existing skill");
+
+  const repeatUpdate = await importRepoSkill(oneRepoUrl, "skills", "Gamma Three", null, { update: true });
+  ok(repeatUpdate.imported && repeatUpdate.imported.length === 1, "update single import overwrites the existing skill");
+  eq(repeatUpdate.imported[0].overwritten, true, "update single import reports overwritten");
+
+  const missingName = await importRepoSkill(oneRepoUrl, "skills", "No Such Skill");
+  ok(missingName.ok === false, "importRepoSkill rejects an unknown skill name");
+  eq(missingName.code, "error.github.skillNotFound", "unknown skill name carries the skillNotFound code");
+
+  // 已保存仓库配置的浏览/导入入口：未保存时先报 notSet。
+  const notSetList = await listSavedRepoSkills();
+  ok(notSetList.ok === false, "listSavedRepoSkills errors before any repo is saved");
+  eq(notSetList.code, "error.github.notSet", "unsaved repo list carries the notSet code");
+  const notSetOne = await importSavedRepoSkill("Gamma Three");
+  ok(notSetOne.ok === false, "importSavedRepoSkill errors before any repo is saved");
+  eq(notSetOne.code, "error.github.notSet", "unsaved single import carries the notSet code");
+
+  await saveGitRepo(oneRepoUrl, "skills");
+  const savedList = await listSavedRepoSkills();
+  ok(savedList.ok === true && (savedList.skills || []).length === 2, "listSavedRepoSkills lists the saved repo skills");
+  const savedImport = await importSavedRepoSkill("delta-four");
+  ok(savedImport.imported && savedImport.imported.length === 1, "importSavedRepoSkill imports the chosen skill from the saved repo");
+  ok(await resolveEntry(dshRoot, "delta-four") !== null, "saved-repo single-imported skill resolvable");
+  await clearGitRepo();
 }
 
 // ── 状态快照 ──

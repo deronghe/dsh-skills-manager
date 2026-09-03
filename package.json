@@ -1,6 +1,6 @@
 {
   "name": "@deronghe/dsh-skills-manager",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "NPM-installable DSH Web plugin for managing local skills and viewing shared Agent skills safely, with DSH Desktop upload support.",
   "license": "Apache-2.0",
   "repository": {
