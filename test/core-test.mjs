@@ -34,6 +34,8 @@ import {
   listSavedRepoSkills,
   importRepoSkill,
   importSavedRepoSkill,
+  importRepoSkills,
+  importSavedRepoSkills,
   loadSettings,
   pushConfig,
   savePushConfig,
@@ -674,6 +676,12 @@ ok(!emitted.some((event) => event[0] === "agent-preset/selected" && event[1] ===
     const updateOnePayload = await updateOne.json();
     eq(updateOne.status, 200, "POST /github/import-one returns 200 with update=true");
     eq(updateOnePayload.data.imported[0].overwritten, true, "import-one with update=true overwrites the installed skill");
+    const manyResp = await fetch(api + "/github/import-many", { method: "POST", headers: secureHeaders, body: JSON.stringify({ names: ["Route Skill", "Missing Skill"], update: true }) });
+    const manyPayload = await manyResp.json();
+    eq(manyResp.status, 200, "POST /github/import-many returns 200");
+    eq((manyPayload.data.imported || []).length, 1, "import-many imports the installed skill with update=true");
+    eq((manyPayload.data.failed || []).length, 1, "import-many reports the missing skill as failed");
+    eq(manyPayload.data.failed[0].code, "error.github.skillNotFound", "import-many failed entry carries skillNotFound");
     await clearGitRepo();
   }
 } finally {
@@ -742,6 +750,17 @@ if (await gitAvailable()) {
   ok(savedImport.imported && savedImport.imported.length === 1, "importSavedRepoSkill imports the chosen skill from the saved repo");
   ok(await resolveEntry(dshRoot, "delta-four") !== null, "saved-repo single-imported skill resolvable");
   await clearGitRepo();
+
+  const multiDefault = await importRepoSkills(oneRepoUrl, "skills", ["Gamma Three", "delta-four", "No Such Skill"]);
+  eq((multiDefault.imported || []).length, 0, "multi import imports nothing new when all selected skills are installed");
+  eq((multiDefault.skipped || []).length, 2, "multi import skips installed skills by default");
+  eq((multiDefault.failed || []).length, 1, "multi import reports unknown skills as failed");
+  eq(multiDefault.failed[0].code, "error.github.skillNotFound", "multi import failed entry carries skillNotFound");
+  const multiUpdate = await importRepoSkills(oneRepoUrl, "skills", ["Gamma Three", "delta-four"], null, { update: true });
+  eq((multiUpdate.imported || []).length, 2, "multi import with update overwrites the selected skills");
+  eq(multiUpdate.imported.every((item) => item.overwritten === true), true, "multi import with update reports overwritten");
+  const emptyMulti = await importRepoSkills(oneRepoUrl, "skills", []);
+  ok(emptyMulti.imported.length === 0 && emptyMulti.skipped.length === 0 && emptyMulti.failed.length === 0, "multi import with no names is a no-op");
 }
 
 // ── 状态快照 ──
