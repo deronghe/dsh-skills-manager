@@ -35,6 +35,7 @@ import {
   savePushConfig,
   pluginMeta,
   pushSkillToSource,
+  isTransientNetworkError,
 } from "../lib/core.js";
 import { apply as applyHost, notifyChatCatalog } from "../lib/index.js";
 
@@ -805,6 +806,13 @@ eq(agentsPush.params && agentsPush.params.action, "push", "push readonly params.
 const missingPush = await pushSkillToSource(dshRoot, "no-such-skill", { dryRun: true });
 ok(missingPush.ok === false, "push of a missing skill is an error");
 eq(missingPush.code, "error.skill.notFound", "push missing skill carries the notFound code");
+
+// ── 传输层瞬时失败判定：schannel 握手失败必须命中，真实错误不得命中 ──
+ok(isTransientNetworkError("fatal: unable to access 'https://github.com/deronghe/skills/': schannel: failed to receive handshake, SSL/TLS connection failed") === true, "transient classifier matches the schannel handshake failure");
+ok(isTransientNetworkError("could not resolve host: github.com") === true, "transient classifier matches DNS resolution failure");
+ok(isTransientNetworkError("") === false, "transient classifier rejects empty text");
+ok(isTransientNetworkError("Repository not found.") === false, "transient classifier rejects repo-not-found");
+ok(isTransientNetworkError("remote: Invalid username or password") === false, "transient classifier rejects credential failures");
 
 // 清理
 await rm(tmp, { recursive: true, force: true });
